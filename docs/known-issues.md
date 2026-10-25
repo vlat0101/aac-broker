@@ -18,6 +18,12 @@ Impact: a stalled card and a misleading audit line — not a wrong release. Fix:
 query kind and value on the pending record, and read the vault state at expiry rather than at
 arrival.
 
+### Collection scoping is off unless you configure it
+
+`AAC_BROKER_COLLECTION_ID` is unset by default, so domain lookups run across the whole vault and the
+collection guard added below has nothing to compare against. That is a deliberate default for a
+single-user vault, not an oversight — but if you run this against a shared vault, set it.
+
 ## Fixed in this tree (2026-10-25, with regression tests)
 
 - **A remembered grant could release a different site's credential.** Auto-release matched on
@@ -42,3 +48,8 @@ arrival.
   `UMask=0077`.
 - **The Pushover body carried the vault username**, which a third party stores; the tailnet page
   keeps that detail.
+- **`origin_ok` treated a missing `Origin` as permission.** It now decides on `Sec-Fetch-Site`:
+  `cross-site` is refused outright, a missing `Origin` is allowed only when the browser says
+  `same-origin`/`same-site`, and a request with neither header is refused. A bare client (`curl`
+  on the broker) therefore cannot POST to the page even with the break-glass token — it has to send
+  one of the two headers, which is the point.

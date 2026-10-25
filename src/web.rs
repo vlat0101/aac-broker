@@ -253,15 +253,36 @@ fn short(fp: &str) -> String {
 /// A browser sends `Origin` on a form POST. A mismatched origin is refused;
 /// an absent one is fine here because the bearer token is the real gate and
 /// non-browser clients (`curl` on the box) do not send it.
+/// Is this POST from our own page?
+///
+/// `Origin` is the primary check. A missing `Origin` used to be allowed outright, which is fine
+/// for a same-origin form post but also means "no evidence either way" was treated as yes. The
+/// deciding header is now `Sec-Fetch-Site`, which every current browser sends:
+///
+///   * `same-origin` / `same-site` — allow, this is our own page.
+///   * `cross-site` — refuse, whatever `Origin` claims (or fails to).
+///   * neither header at all — refuse, unless the request also carries the owner's tailnet
+///     identity. A headless client (curl on the broker itself) has no browser headers and no
+///     identity, so it stays out; an operator's browser always sends one of the two.
 fn origin_ok(headers: &HeaderMap, expected_host: &str) -> bool {
+    let fetch_site = headers
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if fetch_site == "cross-site" {
+        return false;
+    }
+    let same_site_fetch = fetch_site == "same-origin" || fetch_site == "same-site";
     match headers.get("origin").and_then(|v| v.to_str().ok()) {
-        None => true,
         Some(o) => {
             let host = o
                 .trim_start_matches("https://")
                 .trim_start_matches("http://");
             host.split('/').next() == Some(expected_host)
         }
+        // No Origin: acceptable only when the browser told us it is our own page.
+        None => same_site_fetch,
     }
 }
 
@@ -1859,12 +1880,31 @@ mod tests {
     }
 
     #[test]
-    fn same_origin_check_allows_absent_origin_and_matching_host() {
+    fn same_origin_check_requires_evidence_not_silence() {
+        // A browser on our own page: Origin matches, Sec-Fetch-Site agrees.
         let mut h = HeaderMap::new();
-        assert!(origin_ok(&h, "broker.example"));
         h.insert("origin", HeaderValue::from_static("https://broker.example"));
+        h.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
         assert!(origin_ok(&h, "broker.example"));
+
+        // No Origin, but the browser said same-origin: our own form post, allowed.
+        let mut h = HeaderMap::new();
+        h.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        assert!(origin_ok(&h, "broker.example"));
+
+        // Cross-site is refused even when the header is missing.
+        let mut h = HeaderMap::new();
+        h.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+        assert!(!origin_ok(&h, "broker.example"));
+
+        // Wrong Origin is refused, whatever Sec-Fetch-Site says.
+        let mut h = HeaderMap::new();
         h.insert("origin", HeaderValue::from_static("https://evil.example"));
+        h.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        assert!(!origin_ok(&h, "broker.example"));
+
+        // No headers at all — a bare client. No evidence either way is not a yes.
+        let h = HeaderMap::new();
         assert!(!origin_ok(&h, "broker.example"));
     }
 
