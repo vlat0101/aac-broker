@@ -5,6 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# This process holds an unlocked vault session in memory and writes bw-session.json when
+# AAC_BROKER_PERSIST_SESSION is on. It has no business running as root.
+User=aac-broker
+Group=aac-broker
+UMask=0077
+Environment=HOME=/var/lib/aac-broker
+Environment=BW_CONFIG_DIR=/var/lib/aac-broker/bw
 # Secrets and tunables live here (0600). See deploy/env.example.
 EnvironmentFile=/etc/aac-broker/env
 # bw resolves its config relative to HOME. Without this it tries /.config,

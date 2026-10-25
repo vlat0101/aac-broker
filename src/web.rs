@@ -1,11 +1,20 @@
 //! The approval surface.
 //!
-//! Bound to 127.0.0.1 and published on the tailnet by `tailscale serve`. The
-//! tailnet is a network control, not an authentication control: every route
-//! except `/healthz` requires a bearer token (`AAC_BROKER_TOKEN`), because any
-//! peer that can reach the socket could otherwise read pairing codes and
-//! approve credential releases. Everything the page shows about a request is
-//! labelled verified or claimed — an agent controls half of it.
+//! Bound to 127.0.0.1 and published on the tailnet by `tailscale serve`.
+//!
+//! **Authentication is the identity `tailscale serve` injects**
+//! (`Tailscale-User-Login`, trusted only alongside `X-Forwarded-For`, which rejects a raw local
+//! request trying to set the header itself), and that identity must equal `AAC_BROKER_OWNER`.
+//! Tagged devices receive no identity header at all, so an agent host cannot approve its own
+//! request. The bearer-token path (`AAC_BROKER_ALLOW_TOKEN` + `AAC_BROKER_TOKEN`) is a break-glass
+//! second mechanism, off by default.
+//!
+//! Every state-changing POST also checks `origin_ok`, which compares the request's host and origin
+//! against `AAC_BROKER_HOST`: an authorised request from the operator's own browser is still a
+//! cross-site request if a page somewhere else made it.
+//!
+//! Everything the page shows about a request is labelled verified or claimed — an agent controls
+//! half of it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -355,6 +364,16 @@ fn banner(msg: Option<&str>) -> String {
         Some("pair-none") => ("banner warn", "There was no pending pairing code."),
         Some("nopick") => ("banner warn", "Nothing approved — pick which item first."),
         Some("revoked") => ("banner ok", "Remembered approval revoked."),
+        Some("revoke-failed") => (
+            "banner warn",
+            "That approval was NOT revoked: the grants file could not be written. It is still in \
+             place and will load again on the next start — fix the state directory permissions.",
+        ),
+        Some("grant-failed") => (
+            "banner warn",
+            "Approved, but the grant could NOT be saved, so nothing was remembered. The credential \
+             was not released. Check the state directory permissions, then approve again.",
+        ),
         Some("unpaired") => (
             "banner ok",
             "Device unpaired. The relay link restarts and that host must pair again.",
@@ -484,7 +503,10 @@ fn render(st: &AppState, msg: Option<&str>, page: usize) -> String {
       <span class="pname">{name}</span>{user}{tag}
       <span class="puri">{uri}</span></label>"#,
                     id = esc(&item.id),
-                    checked = if n == 0 { " checked" } else { "" },
+                    // Pre-checking the first row is how a `com.au`-style near-match becomes the
+                    // default approval. Only a row whose host matches the request exactly may be
+                    // pre-selected; everything else needs a deliberate tap.
+                    checked = if n == 0 && exact { " checked" } else { "" },
                     name = esc(&item.name),
                     user = item
                         .username
@@ -1196,23 +1218,31 @@ async fn decision(
             .map(|i| i.name.clone())
             .unwrap_or_default();
         let domain = Some(decided.requested.as_str());
-        if secs == 0 {
-            st.grants.add_permanent(
-                &decided.fingerprint,
-                &decided.device,
-                &item_id,
-                &name,
-                domain,
-            );
+        // If the grant cannot be written, the approval must fail: the operator is about to be
+        // told this site is remembered, and a grant that vanishes on the next start is worse than
+        // no grant at all.
+        let written = if secs == 0 {
+            st.grants
+                .add_permanent(&decided.fingerprint, &decided.device, &item_id, &name, domain)
         } else {
-            st.grants.add(
-                &decided.fingerprint,
-                &decided.device,
-                &item_id,
-                &name,
-                domain,
-                secs,
-            );
+            st.grants
+                .add(&decided.fingerprint, &decided.device, &item_id, &name, domain, secs)
+        };
+        if let Err(e) = written {
+            let _ = st.audit.write(Entry {
+                ts: now(),
+                kind: "grant",
+                device: Some(&decided.device),
+                fingerprint: Some(&decided.fingerprint),
+                agent: None,
+                requested: Some(decided.requested.as_str()),
+                item_id: Some(&item_id),
+                item_name: Some(&name),
+                reason: None,
+                outcome: "grant-write-failed",
+                detail: Some(&e),
+            });
+            return see_other("grant-failed");
         }
         let detail = if secs == 0 {
             format!("permanent by {}", st.actor(&headers))
@@ -1263,6 +1293,11 @@ async fn revoke_device(
 ) -> Response {
     if !st.authorised(&headers) {
         return denied("not authorised");
+    }
+    // Every other state-changing POST calls this; unpair used to skip it, and unpair is the most
+    // destructive one on the page.
+    if !origin_ok(&headers, &st.expected_host) {
+        return (StatusCode::FORBIDDEN, Html(String::from("bad origin"))).into_response();
     }
     if f.confirm.as_deref() != Some("yes") {
         return see_other("unpair-failed");
@@ -1316,7 +1351,25 @@ async fn revoke(
     if !origin_ok(&headers, &st.expected_host) {
         return (StatusCode::FORBIDDEN, Html(String::from("bad origin"))).into_response();
     }
-    let removed = st.grants.revoke(&f.fingerprint, &f.item_id);
+    let removed = match st.grants.revoke(&f.fingerprint, &f.item_id) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = st.audit.write(Entry {
+                ts: now(),
+                kind: "grant",
+                device: None,
+                fingerprint: Some(&f.fingerprint),
+                agent: None,
+                requested: None,
+                item_id: Some(&f.item_id),
+                item_name: None,
+                reason: None,
+                outcome: "revoke-write-failed",
+                detail: Some(&e),
+            });
+            return see_other("revoke-failed");
+        }
+    };
     let _ = st.audit.write(Entry {
         ts: now(),
         kind: "grant",
@@ -1514,15 +1567,12 @@ mod tests {
             .expect("add");
         let hermes_fp = hex::encode([5u8; 32]);
         let grok_fp = hex::encode([6u8; 32]);
-        s.grants.add_permanent(
-            &hermes_fp,
-            "hermes-lxc",
-            "item-github",
-            "GitHub",
-            Some("github.com"),
-        );
         s.grants
-            .add(&grok_fp, "grokbot", "item-stripe", "Stripe", Some("api.stripe.com"), 3600);
+            .add_permanent(&hermes_fp, "hermes-lxc", "item-github", "GitHub", Some("github.com"))
+            .expect("grant");
+        s.grants
+            .add(&grok_fp, "grokbot", "item-stripe", "Stripe", Some("api.stripe.com"), 3600)
+            .expect("grant");
 
         let html = render(&s, None, 1);
         assert!(html.contains("1 approval(s)"), "counts per device");

@@ -341,6 +341,26 @@ impl Vault {
         Ok(parse_candidates(&raw))
     }
 
+    /// Is this item inside the configured collection?
+    ///
+    /// `bw get item <id>` ignores collection scoping, so an id query — which is the one path that
+    /// does not go through a scoped `--collectionid` search — could otherwise reach any item in the
+    /// vault, including outside the collection the broker was told to serve.
+    pub async fn item_in_collection(
+        &self,
+        item_id: &str,
+        collection_id: &str,
+    ) -> Result<bool, String> {
+        let session = self.session().ok_or("vault is locked")?;
+        let raw = self
+            .run(
+                &["list", "items", "--collectionid", collection_id],
+                &[(SESSION_ENV, &session)],
+            )
+            .await?;
+        Ok(parse_candidates(&raw).iter().any(|c| c.id == item_id))
+    }
+
     /// Metadata for one item, for the approval card — no password is returned
     /// and none is parsed. Used when an agent asks by vault item id.
     pub async fn candidate_by_id(&self, item_id: &str) -> Result<Candidate, String> {

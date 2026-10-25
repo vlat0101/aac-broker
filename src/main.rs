@@ -189,7 +189,17 @@ pub(crate) async fn resolve_candidates(
     collection: Option<&str>,
 ) -> Result<Vec<Candidate>, String> {
     match query {
-        CredentialQuery::Id(id) => vault.candidate_by_id(id).await.map(|c| vec![c]),
+        CredentialQuery::Id(id) => {
+            let item = vault.candidate_by_id(id).await?;
+            // An id query skips the scoped search, so check the collection explicitly rather than
+            // letting an agent name any item in the vault.
+            if let Some(cid) = collection {
+                if !vault.item_in_collection(id, cid).await? {
+                    return Err(format!("item {id} is not in the configured collection"));
+                }
+            }
+            Ok(vec![item])
+        }
         _ => {
             let mut hits = vault.candidates(what, collection).await?;
             // A narrow term can miss an item stored under a wider host, e.g.
@@ -241,6 +251,27 @@ pub(crate) fn rank_candidates(candidates: &[Candidate], domain: &str) -> Vec<Can
         .collect()
 }
 
+/// Normalised host with a leading `www.` removed, for comparing a request against an item's URIs.
+pub(crate) fn same_site(a: &str, b: &str) -> bool {
+    fn norm(h: &str) -> String {
+        let h = h.trim().trim_end_matches('.');
+        h.strip_prefix("www.").unwrap_or(h).to_string()
+    }
+    let (a, b) = (norm(a), norm(b));
+    !a.is_empty() && !b.is_empty() && a == b
+}
+
+/// True when the vault item itself lists the requested host. An approval is for a host, not for a
+/// word: Bitwarden's search is a substring match, so "the only granted hit" is not evidence that
+/// this item is the site the agent asked for.
+pub(crate) fn item_matches_host(item: &Candidate, domain: &str) -> bool {
+    let wanted = host_of(domain);
+    if wanted.is_empty() {
+        return false;
+    }
+    item.uris.iter().any(|u| same_site(&host_of(u), &wanted))
+}
+
 /// 3 exact host, 2 sub/super-domain, 1 same registrable domain, 0 unrelated.
 fn host_score(host: &str, wanted: &str, base: &str) -> u8 {
     if host == wanted {
@@ -253,7 +284,11 @@ fn host_score(host: &str, wanted: &str, base: &str) -> u8 {
     }
     if host.ends_with(&format!(".{wanted}")) || wanted.ends_with(&format!(".{host}")) {
         2
-    } else if !base.is_empty() && (host == base || host.ends_with(&format!(".{base}"))) {
+    } else if !base.is_empty()
+        && !is_public_suffix(base)
+        && !is_public_suffix(host)
+        && (host == base || host.ends_with(&format!(".{base}")))
+    {
         1
     } else {
         0
@@ -261,13 +296,52 @@ fn host_score(host: &str, wanted: &str, base: &str) -> u8 {
 }
 
 /// Last two labels: `www.racv.com.au` -> `racv.com.au`.
+/// Two-label public suffixes we are willing to recognise. This is not the Public Suffix List —
+/// it is the set of suffixes where "take the last two labels" gives the WRONG answer, which is the
+/// only thing this function is used for. An unlisted multi-label suffix degrades to the old
+/// behaviour (too broad), never to something narrower, so the failure is a missed fallback search,
+/// not a release.
+const MULTI_LABEL_SUFFIXES: &[&str] = &[
+    "com.au", "net.au", "org.au", "edu.au", "gov.au", "id.au", "asn.au",
+    "co.uk", "org.uk", "me.uk", "ltd.uk", "plc.uk", "ac.uk", "gov.uk", "net.uk",
+    "co.nz", "net.nz", "org.nz", "govt.nz", "ac.nz",
+    "co.za", "org.za", "net.za",
+    "com.br", "com.mx", "com.ar", "com.tr", "com.sg", "com.hk", "com.my", "com.tw",
+    "co.jp", "or.jp", "ne.jp", "ac.jp",
+    "co.in", "net.in", "org.in",
+    "co.kr", "or.kr",
+    "com.cn", "net.cn", "org.cn",
+    "co.il", "org.il",
+];
+
+/// True when `host` is itself a bare public suffix (`com.au`), i.e. not a registrable domain.
+pub(crate) fn is_public_suffix(host: &str) -> bool {
+    let h = host.trim_matches('.').to_lowercase();
+    MULTI_LABEL_SUFFIXES.contains(&h.as_str()) || !h.contains('.')
+}
+
+/// The registrable domain of a host: `www.racv.com.au` -> `racv.com.au`, `a.b.example.co.uk` ->
+/// `example.co.uk`. Returns an empty string when the host IS a public suffix, because there is no
+/// domain to fall back to — searching for `com.au` matches the whole country.
 pub(crate) fn registrable(host: &str) -> String {
+    let host = host.trim_matches('.').to_lowercase();
     let parts: Vec<&str> = host.split('.').filter(|p| !p.is_empty()).collect();
-    if parts.len() <= 2 {
-        parts.join(".")
-    } else {
-        parts[parts.len() - 2..].join(".")
+    if parts.len() < 2 {
+        return String::new();
     }
+    let last_two = parts[parts.len() - 2..].join(".");
+    if MULTI_LABEL_SUFFIXES.contains(&last_two.as_str()) {
+        // `racv.com.au` needs three labels; `com.au` has nothing above the suffix.
+        return if parts.len() >= 3 {
+            parts[parts.len() - 3..].join(".")
+        } else {
+            String::new()
+        };
+    }
+    if is_public_suffix(&host) {
+        return String::new();
+    }
+    last_two
 }
 
 struct Service {
@@ -385,7 +459,17 @@ impl Service {
         // are, the operator has to choose again rather than have us guess.
         let remembered: Vec<&Candidate> = items
             .iter()
-            .filter(|i| self.st.grants.is_granted(&fingerprint, &i.id))
+            .filter(|i| {
+                // Both halves matter. The item must still list the requested host, and the grant
+                // must have been made for that host. Without the first check, any query that
+                // merely surfaces the item as a search hit (or an `item {id}` query, which has no
+                // host at all) would release it with no card and no approval.
+                item_matches_host(i, &ask.what)
+                    && self
+                        .st
+                        .grants
+                        .is_granted_for(&fingerprint, &i.id, &host_of(&ask.what))
+            })
             .collect();
         if remembered.len() == 1 {
             let item = remembered[0];
@@ -405,7 +489,12 @@ impl Service {
             return self.release(reply, item, &ask, &device, &fingerprint).await;
         }
 
-        let id = format!("{}-{}", now(), short_hex(&identity));
+        // A pending id keys a map, so two requests from one device in the same second used to
+        // collide: the second replaced the first, the loser's receiver errored, and expiry then
+        // removed the survivor. The counter makes the id unique per request.
+        static PENDING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = PENDING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = format!("{}-{}-{}", now(), short_hex(&identity), seq);
         let rx = self.st.pending.open(PendingRequest {
             locked: !unlocked,
             by_id: matches!(query, CredentialQuery::Id(_)),
@@ -431,16 +520,9 @@ impl Service {
                     "{} wants {what}",
                     ask.agent.as_deref().unwrap_or(&device)
                 ),
-                &format!(
-                    "{} · {}{}",
-                    device,
-                    what,
-                    items
-                        .first()
-                        .and_then(|i| i.username.as_deref())
-                        .map(|u| format!(" ({u})"))
-                        .unwrap_or_default()
-                ),
+                // No vault username in the push body. Pushover stores the message on a third
+                // party's account; the tailnet page is where the rich detail belongs.
+                &format!("{device} · {what}"),
                 std::env::var("AAC_BROKER_PUBLIC_URL").ok().as_deref(),
             );
         }
@@ -988,8 +1070,14 @@ async fn serve(proxy_url: String, pair: Option<String>) -> Result<(), BoxError> 
                                 let dropped = st.pending.expire_for(&key);
                                 // A revoked device's approvals are both useless
                                 // and a record of what it could read.
-                                let forgotten = st.grants.forget_device(&key);
-                                info!("unpaired {key}: {n} connection(s), {dropped} waiting request(s) dropped, {forgotten} approval(s) cleared");
+                                match st.grants.forget_device(&key) {
+                                    Ok(forgotten) => info!("unpaired {key}: {n} connection(s), {dropped} waiting request(s) dropped, {forgotten} approval(s) cleared"),
+                                    Err(e) => {
+                                        // The pairing is gone but its approvals are still on disk.
+                                        // Say so loudly: pairing again would restore auto-release.
+                                        warn!("unpaired {key} but could NOT clear its approvals: {e}");
+                                    }
+                                }
                             }
                             let _ = reply.send(Ok(n));
                         }
@@ -1217,5 +1305,47 @@ mod tests {
         // an empty ask cannot score anything, so nothing is preferred
         assert_eq!(host_score("github.com", "", ""), 0);
         assert!(rank_candidates(&cs, "   ")[0].uris[0].contains("github"));
+    }
+
+    // Regression: `registrable` used to return the last two labels, so every `.com.au` host
+    // collapsed to `com.au` — and the fallback search then matched the whole country.
+    #[test]
+    fn registrable_understands_multi_label_suffixes() {
+        assert_eq!(registrable("www.racv.com.au"), "racv.com.au");
+        assert_eq!(registrable("racv.com.au"), "racv.com.au");
+        assert_eq!(registrable("a.b.example.co.uk"), "example.co.uk");
+        assert_eq!(registrable("github.com"), "github.com");
+        assert_eq!(registrable("www.github.com"), "github.com");
+        // A bare public suffix has no registrable domain: searching for it is not a fallback.
+        assert_eq!(registrable("com.au"), "");
+        assert_eq!(registrable("co.uk"), "");
+        assert_eq!(registrable("com"), "");
+    }
+
+    // Regression: a public suffix must never score as a site match.
+    #[test]
+    fn a_public_suffix_is_not_a_host_match() {
+        assert_eq!(host_score("other.com.au", "www.racv.com.au", "com.au"), 0);
+        // A subdomain of the wanted host is a superdomain match (2), not an exact one (3) —
+        // `item_matches_host` is what strips the `www.` when a grant is checked.
+        assert_eq!(host_score("racv.com.au", "www.racv.com.au", "racv.com.au"), 2);
+        assert_eq!(host_score("www.racv.com.au", "racv.com.au", "racv.com.au"), 2);
+    }
+
+    // Regression: an approval is for a host. An item that merely shares a search hit must not be
+    // treated as the requested site, because that is what let a remembered grant auto-release it.
+    #[test]
+    fn item_matches_host_requires_a_real_host_match() {
+        let item = Candidate {
+            id: "item-1".into(),
+            name: "GitHub".into(),
+            username: Some("u".into()),
+            uris: vec!["https://github.com/login".into()],
+        };
+        assert!(item_matches_host(&item, "github.com"));
+        assert!(item_matches_host(&item, "www.github.com"));
+        assert!(!item_matches_host(&item, "racv.com.au"));
+        // An `item <id>` query has no host, so nothing can auto-release on it.
+        assert!(!item_matches_host(&item, "item item-1"));
     }
 }
