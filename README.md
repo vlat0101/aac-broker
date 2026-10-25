@@ -104,7 +104,7 @@ Environment (systemd `EnvironmentFile`):
 | `PUSHOVER_TOKEN` / `PUSHOVER_USER` | doorbell; absent means no notifications |
 | `PUSHOVER_SOUND` | Pushover sound name (default `bike` — a light bell) |
 | `PUSHOVER_PRIORITY` | `-2..2`, default `0`; `1` bypasses quiet hours, so raise it deliberately |
-| `HOME`, `BW_CONFIG_DIR` | **required** — without `HOME`, `bw` writes to `/.config` and dies |
+| `HOME`, `BW_CONFIG_DIR` | **required** — without `HOME`, `bw` writes to `/.config` and dies. `bw` ignores `BW_CONFIG_DIR` and reads `$HOME/.config/Bitwarden CLI`, so that path must be a symlink to the state dir (`bw`) or the vault reads as unauthenticated |
 
 ## Build
 
