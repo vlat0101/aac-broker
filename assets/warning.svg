@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="427" viewBox="0 0 980 427" role="img" aria-label="Warning: this can send your real password to an AI agent. Only after you approve a request and only for the item you name, but approve the wrong request or let the agent be compromised and that password leaves your vault. Start with a throwaway login. Provided as-is with no warranty; if a credential leaks that is your risk to carry. See the licence sections 7 and 8.">
+  <rect x="2" y="2" width="976" height="423" rx="10" fill="#b91c1c" stroke="#7f1d1d" stroke-width="4"/>
+  <text x="36" y="58" font-family="Helvetica, Arial, sans-serif" font-size="32" font-weight="bold" fill="#ffffff">WARNING — THIS CAN SEND YOUR REAL</text>
+  <text x="36" y="102" font-family="Helvetica, Arial, sans-serif" font-size="32" font-weight="bold" fill="#ffffff">PASSWORD TO AN AI AGENT</text>
+  <text x="36" y="158" font-family="Helvetica, Arial, sans-serif" font-size="21" fill="#ffffff">Only after you approve a request, and only for the item you name. But approve the</text>
+  <text x="36" y="189" font-family="Helvetica, Arial, sans-serif" font-size="21" fill="#ffffff">wrong request, or let the agent be fooled or compromised, and that password leaves</text>
+  <text x="36" y="220" font-family="Helvetica, Arial, sans-serif" font-size="21" fill="#ffffff">your vault and sits in that program's environment.</text>
+  <text x="36" y="263" font-family="Helvetica, Arial, sans-serif" font-size="21" font-weight="bold" fill="#ffffff">Start with a throwaway login. Not your bank, not your email, not your only</text>
+  <text x="36" y="294" font-family="Helvetica, Arial, sans-serif" font-size="21" font-weight="bold" fill="#ffffff">copy of anything.</text>
+  <text x="36" y="337" font-family="Helvetica, Arial, sans-serif" font-size="21" fill="#ffffff">Provided as-is, with no warranty. If a credential leaks, that is your risk to carry. See</text>
+  <text x="36" y="368" font-family="Helvetica, Arial, sans-serif" font-size="21" fill="#ffffff">the licence, sections 7 and 8.</text>
+</svg>

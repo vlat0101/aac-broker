@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# The gate that matters: never commit something carrying a private detail from where this came from.
+set -uo pipefail
+exec bash scripts/leak-scan.sh

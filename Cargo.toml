@@ -1,0 +1,32 @@
+[package]
+name = "aac-broker"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Approval broker for Bitwarden Agent Access: Pushover doorbell + tailnet approval page"
+publish = false
+
+[dependencies]
+ap-client = { version = "=0.11.0", features = ["native-websocket"] }
+ap-noise = "=0.11.0"
+ap-proxy-protocol = "=0.11.0"
+async-trait = "0.1"
+axum = "0.8"
+clap = { version = "4.5", features = ["derive"] }
+dirs = "5.0"
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.36", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal", "process"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
+ureq = "2.10"
+zeroize = "1.8"
+
+[lints.clippy]
+unwrap_used = "deny"
+
+[profile.release]
+strip = true
+lto = "thin"

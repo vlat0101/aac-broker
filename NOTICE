@@ -1,0 +1,16 @@
+aac-broker
+Copyright 2026 the aac-broker authors
+
+This product includes software adapted from:
+
+1. aac-touchid — https://github.com/justmytwospence/aac-touchid
+   Copyright the aac-touchid authors
+   Licensed under the Apache License, Version 2.0
+   Adapted: the service loop shape (src/serve.rs) and the file-backed identity and
+   connection stores (src/storage.rs).
+
+2. Bitwarden Agent Access (ap-cli) — https://github.com/bitwarden/agent-access
+   Copyright Bitwarden Inc.
+   Licensed under the Apache License, Version 2.0
+   Adapted transitively via the above: the storage implementations originate in
+   crates/ap-cli/src/storage.

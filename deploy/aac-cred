@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# aac-cred — ask the aac-broker for a credential and inject it into a command.
+#
+#   aac-cred <domain> "<why>" -- <command...>
+#   aac-cred github.com "check gh auth" -- gh auth status
+#
+# The secret never lands in stdout or in the agent's context: it is passed to the
+# child process through its environment as AAC_USERNAME / AAC_PASSWORD / AAC_TOTP
+# (plus AAC_URI, AAC_DOMAIN, AAC_CREDENTIAL_ID). A human approves on the broker's
+# page within the approval window; a denial exits non-zero.
+#
+# Why a wrapper: `aac` refuses to choose between several paired listeners, and
+# the agent's self-declared name and reason are what the approval page shows —
+# both belong in one place rather than in every ad-hoc call.
+set -uo pipefail
+
+DOMAIN="${1:-}"
+REASON="${2:-}"
+if [ -z "$DOMAIN" ] || [ -z "$REASON" ]; then
+  echo "usage: aac-cred <domain> \"<why>\" -- <command...>" >&2
+  exit 64
+fi
+shift 2
+[ "${1:-}" = "--" ] && shift
+[ "$#" -gt 0 ] || { echo "aac-cred: no command given" >&2; exit 64; }
+
+FP_FILE="${AAC_BROKER_PEER_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/aac-broker-peer}"
+SESSION="${AAC_SESSION:-}"
+if [ -z "$SESSION" ] && [ -r "$FP_FILE" ]; then
+  SESSION="$(tr -d '[:space:]' < "$FP_FILE")"
+fi
+[ -n "$SESSION" ] || { echo "aac-cred: no broker fingerprint (set AAC_SESSION)" >&2; exit 69; }
+
+AGENT="${AAC_AGENT_NAME:-hermes}"
+# Must exceed the broker's AAC_BROKER_TIMEOUT (default 300s), otherwise the
+# client gives up while the request is still waiting for a human.
+TIMEOUT="${AAC_TIMEOUT:-330}"
+
+exec aac run \
+  --session "$SESSION" \
+  --domain "$DOMAIN | $AGENT | $REASON" \
+  --env-all \
+  --timeout "$TIMEOUT" \
+  -- "$@"

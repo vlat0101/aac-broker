@@ -1,0 +1,25 @@
+[Unit]
+Description=aac-broker — Bitwarden Agent Access approval broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Secrets and tunables live here (0600). See deploy/env.example.
+EnvironmentFile=/etc/aac-broker/env
+# bw resolves its config relative to HOME. Without this it tries /.config,
+# which ProtectSystem=strict makes read-only, and every unlock fails with EROFS.
+Environment=HOME=/root
+Environment=BW_CONFIG_DIR=/var/lib/aac-broker/bw
+ExecStart=/usr/local/bin/aac-broker serve
+Restart=always
+RestartSec=5
+StateDirectory=aac-broker
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+# Only the state directory (which holds the bw config and the audit log) is writable.
+ReadWritePaths=/var/lib/aac-broker
+
+[Install]
+WantedBy=multi-user.target
